@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS flows_queue
           kafka_schema = './FlowMessage.proto:FlowMessage',
           kafka_max_block_size = 1048576;
 
+-- LZ4HC (configurable?)
+
 CREATE TABLE IF NOT EXISTS flows_raw
 (
     -- Generated Date field for partitioning
@@ -94,21 +96,21 @@ CREATE TABLE IF NOT EXISTS flows_raw
 
     SequenceNum     UInt64,
 
-    TimeReceived     UInt64,
+    TimeReceived     UInt64,  -- DateTime64(3), Codec(T64,LZ4)
     SamplingRate     UInt64,
 
     FlowDirection    UInt8,
 
     SamplerAddress   IPv6,
 
-    TimeFlowStart    UInt64,
-    TimeFlowEnd      UInt64,
+    TimeFlowStart    UInt64,  -- ^
+    TimeFlowEnd      UInt64,  -- ^
 
-    Bytes            UInt64,
-    Packets          UInt64,
+    Bytes            UInt64,  -- rounding maybe?, play with Codecs
+    Packets          UInt64,  -- ^
 
-    SrcAddr          IPv6,
-    DstAddr          IPv6,
+    SrcAddr          IPv6,  -- bloom filter skip index?
+    DstAddr          IPv6,  -- ^
 
     EType            UInt16,
 
@@ -120,7 +122,7 @@ CREATE TABLE IF NOT EXISTS flows_raw
     InIf             UInt32,
     OutIf            UInt32,
 
-    SrcMac           UInt64,
+    SrcMac           UInt64,  -- skip index maybe, see ^
     DstMac           UInt64,
 
     SrcVlan          UInt32,
@@ -146,15 +148,20 @@ CREATE TABLE IF NOT EXISTS flows_raw
     SrcAS            UInt32,
     DstAS            UInt32,
 
-    NextHop          IPv6,
+    NextHop          IPv6,  -- ^
     NextHopAS        UInt32,
 
     SrcNet           UInt8,
     DstNet           UInt8
 ) ENGINE = MergeTree()
-      PARTITION BY Date
-      ORDER BY (TimeReceived, FlowDirection, SamplerAddress, SrcAS, DstAS, SrcAddr, DstAddr)
+      PARTITION BY toStartOfHour(TimeReceived)
+      PRIMARY KEY (FlowDirection, SamplerAddress, InIf, OutIf, SrcAS, DstAS)
+      ORDER BY (FlowDirection, SamplerAddress, InIf, OutIf, SrcAS, DstAS, SrcAddr, DstAddr)
       TTL Date + INTERVAL 1 WEEK;
+
+-- MVs for common queries
+
+--- Downsampling: TTL GROUP BY expressions
 
 -- goflow stores IP addresses as raw bytes without indicating the protocol.
 -- Normalize them to IPv6 addresses that ClickHouse understands (null prefix rather than suffix).
@@ -175,5 +182,6 @@ SELECT toDate(TimeReceived) AS Date,
           CAST(toFixedString(IPv6v4NullPadding || substr(DstAddr, 1, 4), 16) AS IPv6), DstAddr) AS DstAddr,
        if(endsWith(NextHop, IPv6v4NullPadding) and NextHop != IPv6Null,
           CAST(toFixedString(IPv6v4NullPadding || substr(NextHop, 1, 4), 16) AS IPv6), NextHop) AS NextHop,
-       *
+
+       * EXCEPT (SamplerAddress, SrcAddr, DstAddr, NextHop)
 FROM flows_queue;
